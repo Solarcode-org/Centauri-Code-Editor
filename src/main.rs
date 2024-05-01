@@ -1,13 +1,16 @@
 use std::{fs::read_to_string, io};
 
 use clap::Parser;
+use color_eyre::eyre::bail;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use highlight::{highlight, Theme};
+use logging::initialize_logging;
 use ratatui::{
     buffer::Buffer,
     layout::{Alignment, Rect},
-    style::Stylize as _,
+    style::{Color, Stylize as _},
     symbols::border,
-    text::{Line, Span, Text},
+    text::{Line, Text},
     widgets::{
         block::{Position, Title},
         Block, Borders, Paragraph, Widget,
@@ -15,6 +18,9 @@ use ratatui::{
     Frame,
 };
 
+mod config;
+mod highlight;
+mod logging;
 mod tui;
 
 /// The Centauri code editor.
@@ -22,37 +28,68 @@ mod tui;
 #[command(version, about, long_about = None)]
 struct Args {
     /// The path to the file.
-    file: String,
+    file: Option<String>,
+
+    /// The theme.
+    #[arg(short, long)]
+    theme: Option<String>,
 }
 
-fn main() -> io::Result<()> {
+fn main() -> color_eyre::Result<()> {
     let args = Args::parse();
 
+    initialize_logging()?;
     let mut terminal = tui::init()?;
+
+    let filename = match &args.file {
+        Some(filename) => Some(filename.to_string()),
+        None => None,
+    };
+
+    let contents = match args.file {
+        Some(f) => read_to_string(f),
+        None => Ok(String::new()),
+    };
+
+    let theme = match &args.theme {
+        Some(theme) => match theme.to_lowercase().as_str() {
+            "light" => Theme::Light,
+            "dark" => Theme::Dark,
+            _ => {
+                tui::restore()?;
+                bail!("Invalid theme `{}`.", theme)
+            }
+        },
+        None => Theme::default(),
+    };
+
     let app_result = App {
-        contents: read_to_string(&args.file)?,
-        file: args.file,
+        contents: contents?,
+        file: filename,
         exit: false,
         insert_mode: false,
         row: 0,
         mov_speed: 1,
+        theme,
     }
     .run(&mut terminal);
     tui::restore()?;
-    app_result
+
+    Ok(app_result?)
 }
 
 #[derive(Debug, Default)]
-pub struct App {
-    file: String,
+pub struct App<S: AsRef<str>> {
+    file: Option<S>,
     exit: bool,
-    contents: String,
+    contents: S,
     insert_mode: bool,
     row: usize,
     mov_speed: usize,
+    theme: Theme,
 }
 
-impl App {
+impl<S: AsRef<str>> App<S> {
     /// runs the application's main loop until the user quits
     pub fn run(&mut self, terminal: &mut tui::Tui) -> io::Result<()> {
         while !self.exit {
@@ -99,7 +136,13 @@ impl App {
                     self.insert_mode = true
                 }
             }
-            KeyCode::Down => self.row += self.mov_speed,
+            KeyCode::Down => {
+                let max_down = self.contents.as_ref().lines().clone().count() - 39;
+
+                if self.row + self.mov_speed <= max_down {
+                    self.row += self.mov_speed
+                }
+            }
             KeyCode::Up => {
                 if self.row > self.mov_speed - 1 {
                     self.row -= self.mov_speed
@@ -111,23 +154,25 @@ impl App {
     }
 }
 
-fn highlight<'a>(word: &'a str, previous: &'a str) -> Span<'a> {
-    let word = match word {
-        "fn" | "mut" | "if" | "else" | "while" | "let" | "use" | "mod" | "struct" | "impl"
-        | "pub" | "self" => word.magenta(),
-        s => match previous {
-            "fn" => s.green(),
-            "let" | "mut" | "struct" | "impl" => s.light_blue(),
-            _ => s.into(),
-        },
-    };
-
-    word
-}
-
-impl Widget for &App {
+impl<S: AsRef<str>> Widget for &App<S> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let title = Title::from(format!(" Centauri Code Editor – {} ", self.file).bold());
+        let bg = match self.theme {
+            Theme::Light => Color::White,
+            Theme::Dark => Color::Black,
+        };
+
+        let contents = self.contents.as_ref();
+
+        let title = Title::from(
+            format!(
+                " Centauri Code Editor – {} ",
+                match &self.file {
+                    Some(f) => f.as_ref(),
+                    None => "<NEW FILE>",
+                }
+            )
+            .bold(),
+        );
         let instructions = Title::from(Line::from(vec![
             " Quit ".into(),
             "<Q> ".blue().bold(),
@@ -153,16 +198,9 @@ impl Widget for &App {
 
         let mut lines = vec![];
 
-        let width = self
-            .contents
-            .clone()
-            .lines()
-            .count()
-            .checked_ilog10()
-            .unwrap_or(0)
-            + 1;
+        let width = contents.lines().count().checked_ilog10().unwrap_or(0) + 1;
 
-        let mut lines_ = self.contents.lines();
+        let mut lines_ = contents.lines();
 
         for _ in 0..self.row {
             lines_.next();
@@ -193,8 +231,8 @@ impl Widget for &App {
                 if character.is_whitespace() {
                     let word = highlight(&line[start..index], previous);
 
-                    words.push(word);
-                    words.push(character.to_string().into());
+                    words.push(word.bg(bg));
+                    words.push(character.to_string().bg(bg));
 
                     previous = &line[start..index];
 

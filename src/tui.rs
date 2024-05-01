@@ -1,6 +1,7 @@
 use std::io::{self, stdout, Stdout};
 
 use crossterm::{
+    cursor::{MoveTo, SetCursorStyle::BlinkingBar},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -12,6 +13,8 @@ pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 /// Initialize the terminal
 pub fn init() -> io::Result<Tui> {
     execute!(stdout(), EnterAlternateScreen)?;
+    execute!(stdout(), BlinkingBar)?;
+    execute!(stdout(), MoveTo(0, 0))?;
     enable_raw_mode()?;
     Terminal::new(CrosstermBackend::new(stdout()))
 }
